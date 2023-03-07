@@ -1,0 +1,62 @@
+# https://wiki.geekworm.com/X735_Software
+
+- name: install prerequisites
+  package:
+    name:
+      - python3-smbus
+      - python
+      - pigpio
+      - python-pigpio
+      - python3-pigpio
+      - git
+    state: present
+  become: true
+  ignore_errors: true
+
+- name: clone repo
+  git:
+    dest: /var/opt/x735-v2.5
+    force: yes
+    repo: https://github.com/geekworm-com/x735-v2.5
+  become: true
+
+- name: Find .sh files in /var/opt/x735-v2.5
+  find:
+    paths: /var/opt/x735-v2.5
+    patterns: '*.sh'
+    recurse: true
+  become: true
+  register: shfiles
+
+- name: make .sh files executable
+  file:
+    path: "{{ item.path }}"
+    mode: a+x
+  with_items: "{{ shfiles.files }}"
+  become: true
+
+- name: check if x735 already installed
+  stat:
+    path: /etc/x735pwr.sh
+  register: already_installed
+
+- name: run install.sh
+  shell: 'bash /var/opt/x735-v2.5/install.sh'
+  become: true
+  when: already_installed.stat.exists is false
+
+- name: set alias
+  lineinfile:
+    path: "{{ item }}"
+    line: alias x735off='sudo x735softsd.sh'
+  with_items:
+    - ~/.bashrc
+    - ~/.zshrc
+
+- name: create cronjob for x735 fan
+  cron:
+    name: start fan
+    special_time: reboot
+    user: "{{ ansible_user }}"
+    job: python /var/opt/x735-v2.5/pwm_fan_control.py
+  become: true

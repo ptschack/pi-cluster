@@ -1,0 +1,70 @@
+- name: install software
+  become: yes
+  package:
+    name: ["git", "zsh", "lsd"]
+    state: present
+
+- name: zsh resource configuration test
+  stat:
+    path: "/home/{{ ansible_user }}/.oh-my-zsh"
+  register: zshrc
+  changed_when: false
+
+- name: install oh-my-zsh
+  block:
+    - name: Download zshell installation script
+      become: yes
+      get_url:
+        url: "https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh"
+        dest: /tmp/install_user_zsh.sh
+        mode: 0777
+    # - name: Try to fix Installation Script
+    #   become: yes
+    #   lineinfile:
+    #     path: /tmp/install_user_zsh.sh
+    #     state: absent
+    #     regexp: '^\s*env zsh -l'
+    - name: Execute shell script for user zshell configuration
+      shell: "/tmp/install_user_zsh.sh --unattended"
+    - name: Prepare z-shell resource settings - setting ZSH env
+      lineinfile:
+        path: "/home/{{ ansible_user }}/.zshrc"
+        regexp: '^\s*export ZSH='
+        line: "export ZSH=$HOME/.oh-my-zsh"
+    - name: Setup .zshrc user settings
+      blockinfile:
+        path: "/home/{{ ansible_user }}/.zshrc"
+        create: yes
+        backup: yes
+        insertafter: EOF
+        block: |
+          setopt SHARE_HISTORY
+          export SAVEHIST=200
+          export HISTFILE=~/.zhistory
+  when: zshrc.stat.exists == False
+
+- name: change default shell
+  become: yes
+  user:
+    name: "{{ ansible_user }}"
+    shell: /usr/bin/zsh
+
+- name: configure zshrc
+  lineinfile:
+    path: ~/.zshrc
+    regexp: "{{ item.regex }}"
+    line: "{{ item.line }}"
+  with_items:
+    - { regex: "^ZSH_THEME=", line: "ZSH_THEME=aussiegeek" }
+    - { regex: "^alias ll=", line: 'alias ll="lsd -lah"' }
+    - {
+        regex: "^plugins=",
+        line: "plugins=(git python rsync tmux)",
+      }
+    - { regex: "^ZSH_TMUX_UNICODE=", line: "ZSH_TMUX_UNICODE=true" }
+    - {
+        regex: "^ZSH_TMUX_DEFAULT_SESSION_NAME=",
+        line: "ZSH_TMUX_DEFAULT_SESSION_NAME=main",
+      }
+    - { regex: "^ZSH_TMUX_CONFIG=", line: "ZSH_TMUX_CONFIG=~/tmux.conf" }
+

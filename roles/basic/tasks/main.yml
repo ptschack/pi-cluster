@@ -1,0 +1,50 @@
+- name: add volian apt key
+  become: yes
+  apt_key:
+    state: present
+    url: https://deb.volian.org/volian/scar.key
+
+- name: add repository for nala
+  become: yes
+  apt_repository:
+    repo: deb https://deb.volian.org/volian/ scar main
+    state: present
+    update_cache: yes
+
+- name: copy config files
+  copy:
+    src: "{{ item }}"
+    dest: ~/{{ item }}
+  with_items:
+    - tmux.conf
+
+- name: install basic packages
+  become: yes
+  package:
+    name: "{{ item }}"
+    state: latest
+  with_items:
+    - htop
+    - nano
+    - curl
+    - wget
+    - tmux
+    - jq
+    - cifs-utils
+    - exfat-utils
+    - exfat-fuse
+    - python3
+    - cryptsetup
+    - git
+    - openssh-client
+    - unrar
+    - unzip
+    - nala-legacy
+  ignore_errors: yes
+
+- name: upgrade all packages
+  become: yes
+  apt:
+    update_cache: yes
+    upgrade: full
+    force_apt_get: yes
