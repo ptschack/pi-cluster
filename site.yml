@@ -1,8 +1,6 @@
 - name: provision k3snodes
   hosts: k3snodes
-  remote_user: "{{ ansible_user }}"
   roles:
     - basic
     - zsh
-    - ssh
     - x735

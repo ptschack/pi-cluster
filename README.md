@@ -34,11 +34,14 @@ pip install -r requirements.txt                         # install ansible
 deactivate ; source venv/bin/activate                   # reload virtual environment
 ```
 
+## Sources
+
+> [Raspberry Pi Encrypted Boot with SSH](https://github.com/ViRb3/pi-encrypted-boot-ssh)
+
 ## Individual node setup
 
-### Flash Debian to SD card
+### Flash Debian to SD card with customizations
 
-- Download [Raspberry Pi OS Lite](https://downloads.raspberrypi.org/raspios_lite_arm64/images/) 64 Bit
 - Use [Raspberry Pi Imager](https://downloads.raspberrypi.org/imager/) to set the following options and flash to an SD card
   - hostname
   - ssh key
@@ -48,105 +51,147 @@ deactivate ; source venv/bin/activate                   # reload virtual environ
 
 ### Update Raspberry Pi firmware
 
-Enables booting from USB/GPT.
-
-```bash
-sudo apt-get update
-sudo apt-get dist-upgrade
-sudo apt-get install rpi-eeprom
-sudo rpi-eeprom-update -a
-```
-
-### Variant 1: Partial encryption (system not encrypted, only data partition)
-
-> Source: [HOWTO: Booting the Pi from a GPT partitioned USB Disk](https://forums.raspberrypi.com/viewtopic.php?p=1912293#p1912293)
+Boot the Pi with the SD card you just created, it will restart multiple times. When you can log in, update the firmware, which is needed for booting from GPT partitioned disks.
 
 ```bash
 sudo su
-TARGET_DEVICE=/enter/target/device/here     # WARNING: ALL DATA ON ALL PARTITIONS OF THIS DEVICE WILL BE ERASED
-THIS_DEVICE=/dev/mmcblk0p1                  # this is typically the device path of the sd card
-NUM_SECTORS=$(fdisk -l $THIS_DEVICE | grep -Poe '[0-9]+ sectors' | grep -Po '[0-9]+')
-wipefs -a $TARGET_DEVICE
-fdisk $TARGET_DEVICE
-# Command (m for help): g
-# Created a new GPT disklabel (GUID: xxx).
-# Command (m for help): n
-# Partition number (1-128, default 1): 1
-# First sector (2048-35156656094, default 2048): 2048
-# Last sector, +/-sectors or +/-size{K,M,G,T,P} (2048-35156656094, default 35156656094): +256M
-
-# Created a new partition 1 of type 'Linux filesystem' and of size 256 MiB.
-# Command (m for help): t
-# Selected partition 1
-# Partition type or alias (type L to list all): 11
-# Changed type of partition 'Linux filesystem' to 'Microsoft basic data'.
-
-# Command (m for help): n
-# Partition number (2-128, default 2): 2
-# First sector (526336-35156656094, default 526336): 
-# Last sector, +/-sectors or +/-size{K,M,G,T,P} (526336-35156656094, default 35156656094): +64G
-# Created a new partition 2 of type 'Linux filesystem' and of size 64 GiB.
-
-# Command (m for help): n
-# Partition number (3-128, default 3): 3
-# First sector (134744064-35156656094, default 134744064): 
-# Last sector, +/-sectors or +/-size{K,M,G,T,P} (134744064-35156656094, default 35156656094): +32G
-# Created a new partition 3 of type 'Linux filesystem' and of size 32 GiB.
-
-# Command (m for help): t
-# Partition number (1-3, default 3): 3
-# Partition type or alias (type L to list all): 19
-# Changed type of partition 'Linux filesystem' to 'Linux swap'.
-
-# Command (m for help): n
-# Partition number (4-128, default 4): 4
-# First sector (201852928-35156656094, default 201852928): 
-# Last sector, +/-sectors or +/-size{K,M,G,T,P} (201852928-35156656094, default 35156656094): 
-# Created a new partition 4 of type 'Linux filesystem' and of size 16.3 TiB.
-
-# Command (m for help): w
-# The partition table has been altered.
-# Calling ioctl() to re-read partition table.
-# Syncing disks.
-
-umount /boot
-dd if=${THIS_DEVICE} of=${TARGET_DEVICE}1
-mkfs.ext4 ${TARGET_DEVICE}2
-mkdir -p /mnt/new
-mount ${TARGET_DEVICE}2 /mnt/new
-rsync -avHAX / /mnt/new/ --exclude=/boot --exclude=/mnt --exclude=/dev --exclude=/proc --exclude=/sys
-mkdir -p /mnt/new/{boot,mnt,dev,proc,sys}
-mount ${TARGET_DEVICE}1 /mnt/new/boot
-
-# edit /mnt/new/boot/cmdline.txt and change "root=/dev/mmcblk0p1" to "root=/dev/sda2"
-# edit /mnt/new/etc/fstab and change the lines with /dev/mmcblk0* to use /dev/sda* instead.
+apt-get update
+apt-get -y dist-upgrade
+apt-get -y install rpi-eeprom
+rpi-eeprom-update -a
+reboot
 ```
 
-#### Create encrypted data partition
-
-Remove SD card and reboot.
+### Partition target disk and transfer OS
 
 ```bash
-TARGET_DEVICE=/enter/target/device/here
-CRYPTO_PARTITION=${TARGET_DEVICE}4
-sudo apt install busybox cryptsetup initramfs-tools
-# check algorithm
-cryptsetup benchmark -c xchacha20,aes-adiantum-plain64
-# load kernel modules
-sudo modprobe xchacha20
-sudo modprobe adiantum
-sudo modprobe nhpoly1305
-sudo cryptsetup luksFormat --type luks2 --cipher xchacha20,aes-adiantum-plain64 --hash sha256 --key-size 256 $CRYPTO_PARTITION
-sudo cryptsetup luksOpen $CRYPTO_PARTITION datapart
-sudo mkfs.ext4 /dev/mapper/datapart
-sudo mkdir /media/datapart
-sudo mount /dev/mapper/datapart /media/datapart
-sudo chown -R $(whoami):$(whoami) /media/datapart
+set -e
+apt-get update
+apt-get install -y cryptsetup-bin
+TARGET_DEVICE=/dev/sda
+SOURCE_BOOT_PARTITION=$(mount | grep ' /boot ' | awk '{print $1}')
+parted ${TARGET_DEVICE} mklabel gpt
+parted ${TARGET_DEVICE} mkpart primary fat32 1MiB 1GiB
+parted ${TARGET_DEVICE} mkpart primary ext4 1GiB 100%
+parted ${TARGET_DEVICE} set 1 boot on
+umount /boot
+mount -o ro ${SOURCE_BOOT_PARTITION} /boot
+cryptsetup luksFormat -c xchacha20,aes-adiantum-plain64 --pbkdf-memory 512000 --pbkdf-parallel=1 ${TARGET_DEVICE}2
+cryptsetup open ${TARGET_DEVICE}2 crypted
+mkfs.ext4 /dev/mapper/crypted
+mkdir -p /mnt/chroot/
+mount /dev/mapper/crypted /mnt/chroot/
+rsync -avHAX / /mnt/chroot/ --exclude=/boot --exclude=/mnt --exclude=/dev --exclude=/proc --exclude=/sys
+mkdir -p /mnt/chroot/{boot,mnt,dev,proc,sys}/
+mkfs.vfat ${TARGET_DEVICE}1
+mount ${TARGET_DEVICE}1 /mnt/chroot/boot
+rsync -avHAX /boot /mnt/chroot
+mount -t proc none /mnt/chroot/proc/
+mount -t sysfs none /mnt/chroot/sys/
+mount -o bind /dev /mnt/chroot/dev/
+mount -o bind /dev/pts /mnt/chroot/dev/pts/
 ```
 
-### Variant 2: Full encryption (password required at boot)
+### Chroot into new OS and configure boot
 
-> still to do
+```bash
+LANG=C chroot /mnt/chroot
+set -e
+mv /etc/resolv.conf /etc/resolv.conf.bak
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+apt update
+apt install -y busybox cryptsetup dropbear-initramfs
+TARGET_DEVICE=/dev/sda
+CRYPTO_PART_UUID=$(blkid | grep ${TARGET_DEVICE}2 | grep -Po '(?<= UUID=").[^"]*')
+echo CRYPTO_PART_UUID: ${CRYPTO_PART_UUID}
+NEW_BOOT_PARTUUID=$(blkid | grep ${TARGET_DEVICE}1 | grep -Po '(?<=PARTUUID=").[^"]*')
+echo NEW_BOOT_PARTUUID: ${NEW_BOOT_PARTUUID}
+sed -i 's|^[^\s]* / |/dev/mapper/crypted / |' /etc/fstab
+sed -i 's|^[^\s]* /boot |PARTUUID='${NEW_BOOT_PARTUUID}' / |' /etc/fstab
+echo "crypted UUID=${CRYPTO_PART_UUID} none luks,initramfs" > /etc/crypttab
+sed -i 's|root=.[^\s]* |root=/dev/mapper/crypted cryptdevice=UUID'=${CRYPTO_PART_UUID}':crypted |' /boot/cmdline.txt
+touch /boot/ssh
+echo "CRYPTSETUP=y" >> /etc/cryptsetup-initramfs/conf-hook
+patch --no-backup-if-mismatch /usr/share/initramfs-tools/hooks/cryptroot << 'EOF'
+--- cryptroot
++++ cryptroot
+@@ -33,7 +33,7 @@
+         printf '%s\0' "$target" >>"$DESTDIR/cryptroot/targets"
+         crypttab_find_entry "$target" || return 1
+         crypttab_parse_options --missing-path=warn || return 1
+-        crypttab_print_entry
++        printf '%s %s %s %s\n' "$_CRYPTTAB_NAME" "$_CRYPTTAB_SOURCE" "$_CRYPTTAB_KEY" "$_CRYPTTAB_OPTIONS" >&3
+     fi
+ }
+EOF
+sed -i 's/^TIMEOUT=.*/TIMEOUT=100/g' /usr/share/cryptsetup/initramfs/bin/cryptroot-unlock
+mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+```
+
+Add your SSH keys to the following files:
+
+- `/etc/dropbear-initramfs/authorized_keys`
+- `/root/.ssh/authorized_keys`
+
+The set file properties accordingly:
+
+```bash
+chmod 0600 /etc/dropbear-initramfs/authorized_keys /root/.ssh/authorized_keys
+sed -i 's/^#INITRD=Yes$/INITRD=Yes/g' /etc/default/raspberrypi-kernel
+```
+
+Create `/etc/initramfs-tools/hooks/update_initrd` with the following contents:
+
+```bash
+#!/bin/sh -e
+# Update reference to $INITRD in $BOOTCFG, making the kernel use the new
+# initrd after the next reboot.
+BOOTLDR_DIR=/boot
+BOOTCFG=$BOOTLDR_DIR/config.txt
+INITRD_PFX=initrd.img-
+INITRD=$INITRD_PFX$version
+
+case $1 in
+    prereqs) echo; exit
+esac
+
+FROM="^ *\\(initramfs\\) \\+$INITRD_PFX.\\+ \\+\\(followkernel\\) *\$"
+INTO="\\1 $INITRD \\2"
+
+T=`umask 077 && mktemp --tmpdir genramfs_XXXXXXXXXX.tmp`
+trap "rm -- \"$T\"" 0
+
+sed "s/$FROM/$INTO/" "$BOOTCFG" > "$T"
+
+# Update file only if necessary.
+if ! cmp -s "$BOOTCFG" "$T"
+then
+    cat "$T" > "$BOOTCFG"
+fi
+```
+
+```bash
+chmod +x /etc/initramfs-tools/hooks/update_initrd
+KERNEL_VERSION=$(ls /lib/modules/ | awk '{print $1}')
+mkinitramfs -o /boot/initrd.img-${KERNEL_VERSION} "${KERNEL_VERSION}"
+echo "initramfs initrd.img-${KERNEL_VERSION} followkernel" >> /boot/config.txt
+mv /etc/resolv.conf.bak /etc/resolv.conf
+sync
+history -c && exit
+```
+
+### Host cleanup
+
+```bash
+umount /mnt/chroot/boot
+umount /mnt/chroot/sys
+umount /mnt/chroot/proc
+umount /mnt/chroot/dev/pts
+umount /mnt/chroot/dev
+umount /mnt/chroot
+cryptsetup close crypted
+shutdown -h now
+```
 
 ## Apply Ansible roles
 
@@ -164,10 +209,9 @@ Prepare node and install K3s:
 # append cgroup_memory=1 cgroup_enable=memory to /boot/cmdline.txt and reboot
 curl -sfL https://get.k3s.io | sh -
 sudo kubectl get nodes
-# copy /etc/rancher/k3s/k3s.yaml to control machine
 ```
 
-Copy /etc/rancher/k3s/k3s.yaml to control machine and check status:
+Copy `/etc/rancher/k3s/k3s.yaml` to control machine as `~/.kube/config` and check status:
 
 ```bash
 kubectl run hello-raspi --image=busybox -- /bin/sh -c 'while true; do echo $(date)": Hello Raspi"; sleep 2; done'

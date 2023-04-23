@@ -60,3 +60,7 @@
     user: "{{ ansible_user }}"
     job: python /var/opt/x735-v2.5/pwm_fan_control.py
   become: true
+
+- name: fix /etc/rc.local
+  shell: sed -i 's|python3 .*pwm_fan_control.py|python3 /var/opt/x735-v2.5/pwm_fan_control.py|' /etc/rc.local
+  become: yes
