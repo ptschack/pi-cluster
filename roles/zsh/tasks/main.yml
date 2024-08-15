@@ -58,7 +58,7 @@
     - { regex: "^alias ll=", line: 'alias ll="ls -lah"' }
     - {
         regex: "^plugins=",
-        line: "plugins=(git python rsync tmux)",
+        line: "plugins=(asdf git python rsync tmux)",
       }
     - { regex: "^ZSH_TMUX_UNICODE=", line: "ZSH_TMUX_UNICODE=true" }
     - {
@@ -67,3 +67,9 @@
       }
     - { regex: "^ZSH_TMUX_CONFIG=", line: "ZSH_TMUX_CONFIG=~/tmux.conf" }
 
+- name: configure tmux autostart
+  lineinfile:
+    path: ~/.zshrc
+    regexp: "^ZSH_TMUX_AUTOSTART="
+    line: "ZSH_TMUX_AUTOSTART=true"
+    insertbefore: '^\s*source .*oh-my-zsh\.sh.*$'

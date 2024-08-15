@@ -40,10 +40,10 @@
     path: /etc/x735pwr.sh
   register: already_installed
 
-- name: run install.sh
-  shell: 'bash /var/opt/x735-v2.5/install.sh'
-  become: true
-  when: already_installed.stat.exists is false
+# - name: run install.sh
+#   shell: 'bash /var/opt/x735-v2.5/install.sh'
+#   become: true
+#   when: already_installed.stat.exists is false
 
 - name: set alias
   lineinfile:

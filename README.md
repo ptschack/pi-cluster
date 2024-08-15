@@ -22,6 +22,10 @@ This is a work in progress. It is currently incomplete.
 - 12V 5A AC/DC power adapter, 5.5 x 2.5 [mm](https://en.wikipedia.org/wiki/Millimetre) round DC plug (compatible to 5.5 mm x 2.1 mm)
 - 3.5" SATA harddisk
 
+### Software
+
+Tested with [Raspberry Pi 64-bit Lite OS 12 ("Bookworm")](https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2024-07-04/2024-07-04-raspios-bookworm-arm64-lite.img.xz)
+
 ## Using this Repo
 
 ```bash
@@ -65,52 +69,60 @@ reboot
 ### Partition target disk and transfer OS
 
 ```bash
-set -e
+TARGET_DEVICE=/dev/sda # set TARGET_DEVICE to where you want to transfer the OS (e.g. a HDD)
+```
+
+```bash
+echo $TARGET_DEVICE
 apt-get update
-apt-get install -y cryptsetup-bin
-TARGET_DEVICE=/dev/sda
-SOURCE_BOOT_PARTITION=$(mount | grep ' /boot ' | awk '{print $1}')
+apt-get install -y cryptsetup-bin lshw
+SOURCE_BOOT_PARTITION=$(mount | grep ' /boot/firmware ' | awk '{print $1}')
+echo SOURCE_BOOT_PARTITION: $SOURCE_BOOT_PARTITION
 parted ${TARGET_DEVICE} mklabel gpt
 parted ${TARGET_DEVICE} mkpart primary fat32 1MiB 1GiB
 parted ${TARGET_DEVICE} mkpart primary ext4 1GiB 100%
 parted ${TARGET_DEVICE} set 1 boot on
-umount /boot
-mount -o ro ${SOURCE_BOOT_PARTITION} /boot
+umount /boot/firmware
+mount -o ro ${SOURCE_BOOT_PARTITION} /boot/firmware
 cryptsetup luksFormat -c xchacha20,aes-adiantum-plain64 --pbkdf-memory 512000 --pbkdf-parallel=1 ${TARGET_DEVICE}2
 cryptsetup open ${TARGET_DEVICE}2 crypted
 mkfs.ext4 /dev/mapper/crypted
 mkdir -p /mnt/chroot/
 mount /dev/mapper/crypted /mnt/chroot/
-rsync -avHAX / /mnt/chroot/ --exclude=/boot --exclude=/mnt --exclude=/dev --exclude=/proc --exclude=/sys
+rsync -avHAX / /mnt/chroot/ --exclude=/boot/firmware --exclude=/mnt --exclude=/dev --exclude=/proc --exclude=/sys
 mkdir -p /mnt/chroot/{boot,mnt,dev,proc,sys}/
+mkdir -p /mnt/chroot/boot/firmware
 mkfs.vfat ${TARGET_DEVICE}1
-mount ${TARGET_DEVICE}1 /mnt/chroot/boot
-rsync -avHAX /boot /mnt/chroot
+mount ${TARGET_DEVICE}1 /mnt/chroot/boot/firmware
+rsync -avHAX /boot/firmware /mnt/chroot/boot
 mount -t proc none /mnt/chroot/proc/
 mount -t sysfs none /mnt/chroot/sys/
 mount -o bind /dev /mnt/chroot/dev/
 mount -o bind /dev/pts /mnt/chroot/dev/pts/
+LANG=C chroot /mnt/chroot
 ```
 
-### Chroot into new OS and configure boot
+Inside chroot, configure booting into new OS:
 
 ```bash
-LANG=C chroot /mnt/chroot
-set -e
+TARGET_DEVICE=/dev/sda # again, set TARGET_DEVICE to where you want to transfer the OS (e.g. a HDD)
+```
+
+```bash
 mv /etc/resolv.conf /etc/resolv.conf.bak
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 apt update
-apt install -y busybox cryptsetup dropbear-initramfs
-TARGET_DEVICE=/dev/sda
+apt install -y busybox cryptsetup dropbear-initramfs open-isci
 CRYPTO_PART_UUID=$(blkid | grep ${TARGET_DEVICE}2 | grep -Po '(?<= UUID=").[^"]*')
 echo CRYPTO_PART_UUID: ${CRYPTO_PART_UUID}
 NEW_BOOT_PARTUUID=$(blkid | grep ${TARGET_DEVICE}1 | grep -Po '(?<=PARTUUID=").[^"]*')
 echo NEW_BOOT_PARTUUID: ${NEW_BOOT_PARTUUID}
 sed -i 's|^[^\s]* / |/dev/mapper/crypted / |' /etc/fstab
-sed -i 's|^[^\s]* /boot |PARTUUID='${NEW_BOOT_PARTUUID}' / |' /etc/fstab
+sed -i 's|^[^\s]* /boot/firmware |PARTUUID='${NEW_BOOT_PARTUUID}' /boot/firmware |' /etc/fstab
 echo "crypted UUID=${CRYPTO_PART_UUID} none luks,initramfs" > /etc/crypttab
-sed -i 's|root=.[^\s]* |root=/dev/mapper/crypted cryptdevice=UUID'=${CRYPTO_PART_UUID}':crypted |' /boot/cmdline.txt
+sed -i 's|root=.[^\s]* |root=/dev/mapper/crypted cryptdevice=UUID'=${CRYPTO_PART_UUID}':crypted |' /boot/firmware/cmdline.txt
 touch /boot/ssh
+touch /boot/firmware/ssh
 echo "CRYPTSETUP=y" >> /etc/cryptsetup-initramfs/conf-hook
 patch --no-backup-if-mismatch /usr/share/initramfs-tools/hooks/cryptroot << 'EOF'
 --- cryptroot
@@ -126,18 +138,17 @@ patch --no-backup-if-mismatch /usr/share/initramfs-tools/hooks/cryptroot << 'EOF
 EOF
 sed -i 's/^TIMEOUT=.*/TIMEOUT=100/g' /usr/share/cryptsetup/initramfs/bin/cryptroot-unlock
 mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+sed -i 's|^\s*BOOTDIR.*$||g' /etc/initramfs-tools/update-initramfs.conf
+echo 'BOOTDIR=/boot/firmware' >> /etc/initramfs-tools/update-initramfs.conf
 ```
 
-Add your SSH keys to the following files:
-
-- `/etc/dropbear-initramfs/authorized_keys`
-- `/root/.ssh/authorized_keys`
-
-The set file properties accordingly:
+Paste your SSH keys to the following files and set file properties accordingly:
 
 ```bash
-chmod 0600 /etc/dropbear-initramfs/authorized_keys /root/.ssh/authorized_keys
-sed -i 's/^#INITRD=Yes$/INITRD=Yes/g' /etc/default/raspberrypi-kernel
+nano /etc/dropbear/initramfs/authorized_keys
+nano /root/.ssh/authorized_keys
+nano /home/$SUDO_USER/.ssh/authorized_keys
+chmod 0600 /etc/dropbear/initramfs/authorized_keys /root/.ssh/authorized_keys
 ```
 
 Create `/etc/initramfs-tools/hooks/update_initrd` with the following contents:
@@ -146,7 +157,7 @@ Create `/etc/initramfs-tools/hooks/update_initrd` with the following contents:
 #!/bin/sh -e
 # Update reference to $INITRD in $BOOTCFG, making the kernel use the new
 # initrd after the next reboot.
-BOOTLDR_DIR=/boot
+BOOTLDR_DIR=/boot/firmware
 BOOTCFG=$BOOTLDR_DIR/config.txt
 INITRD_PFX=initrd.img-
 INITRD=$INITRD_PFX$version
@@ -172,10 +183,14 @@ fi
 
 ```bash
 chmod +x /etc/initramfs-tools/hooks/update_initrd
-KERNEL_VERSION=$(ls /lib/modules/ | awk '{print $1}')
-mkinitramfs -o /boot/initrd.img-${KERNEL_VERSION} "${KERNEL_VERSION}"
-echo "initramfs initrd.img-${KERNEL_VERSION} followkernel" >> /boot/config.txt
+echo 'DROPBEAR_OPTIONS="-j -k -p 2222 -s -c cryptroot-unlock"' >> /etc/dropbear/initramfs/dropbear.conf
+KERNELFLAVOR=$([[ $(lshw | grep -Po '(?<=product: Raspberry Pi )[^\s]*') -eq 4 ]] && echo v8 || echo 2712)
+KERNEL_VERSION=$(ls /lib/modules/ | grep $KERNELFLAVOR | awk '{print $1}')
+echo KERNEL_VERSION: $KERNEL_VERSION
+mkinitramfs -o /boot/firmware/initrd.img-${KERNEL_VERSION} "${KERNEL_VERSION}"
+echo "initramfs initrd.img-${KERNEL_VERSION} followkernel" >> /boot/firmware/config.txt
 mv /etc/resolv.conf.bak /etc/resolv.conf
+echo -n ' cgroup_memory=1 cgroup_enable=memory' >> /boot/firmware/cmdline.txt
 sync
 history -c && exit
 ```
@@ -183,7 +198,7 @@ history -c && exit
 ### Host cleanup
 
 ```bash
-umount /mnt/chroot/boot
+umount /mnt/chroot/boot/firmware
 umount /mnt/chroot/sys
 umount /mnt/chroot/proc
 umount /mnt/chroot/dev/pts
@@ -191,6 +206,35 @@ umount /mnt/chroot/dev
 umount /mnt/chroot
 cryptsetup close crypted
 shutdown -h now
+```
+
+### Boot and connect
+
+- Remove the SD card from the Pi
+- When you boot it up, check which IP it has and connect via `ssh -p 2222 root@<IP OF PI>`
+- It should prompt you for the HDD password
+- After successfully entering the password, you are disconnected from the session as the Pi boots
+- connect via `ssh pi@<HOSTNAME>`
+
+### Grow swap space
+
+```bash
+SWAPFILE=/var/swap
+while read i; do
+  if [ ! -z "$i" ]; then
+    echo "deactivate & remove $i"
+    swapoff $i
+    rm -f $i
+  fi
+done<<<$(swapon --show | grep -v 'NAME' | awk '{print $1}')
+if [ -e $SWAPFILE ]; then
+  rm -f $SWAPFILE
+fi
+dd if=/dev/zero of=$SWAPFILE bs=1M count=16384 oflag=append conv=notrunc
+chmod 0600 $SWAPFILE
+mkswap $SWAPFILE
+swapon $SWAPFILE
+swapon --show
 ```
 
 ## Apply Ansible roles
@@ -206,58 +250,85 @@ Source: [Production like Kubernetes on Raspberry Pi: Load-balancer](https://mich
 Prepare node and install K3s:
 
 ```bash
-# append cgroup_memory=1 cgroup_enable=memory to /boot/cmdline.txt and reboot
-curl -sfL https://get.k3s.io | sh -
+curl -sfL https://get.k3s.io | K3S_TOKEN=SECRET sh -s - server --cluster-init
 sudo kubectl get nodes
 ```
 
 Copy `/etc/rancher/k3s/k3s.yaml` to control machine as `~/.kube/config` and check status:
 
 ```bash
-kubectl run hello-raspi --image=busybox -- /bin/sh -c 'while true; do echo $(date)": Hello Raspi"; sleep 2; done'
-kubectl get pods
-kubectl delete pod hello-raspi
+kubectl get namespaces
 ```
 
-### Install MetalLB
+## Install Longhorn
 
-```bash
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.12.1/manifests/namespace.yaml
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.12.1/manifests/metallb.yaml
-kubectl apply -f metallb/address-pool.yaml
-```
-
-### Install Traefik
-
-```bash
-helm repo add traefik https://traefik.github.io/charts
-helm upgrade --install --values=traefik/values.yml --namespace kube-system traefik traefik/traefik
-kubectl -n kube-system get pods
-kubectl -n kube-system get service
-kubectl apply -f traefik/dashboard-ingress-rule.yml
-```
-
-### Let's Encrypt
-
-> still to do
-<!-- ```bash
-kubectl apply -f letsencrypt/ingress_class.yml
-helm repo add jetstack https://charts.jetstack.io
-helm repo update
-kubectl create namespace cert-manager
-helm install cert-manager jetstack/cert-manager --namespace cert-manager --create-namespace  --version v1.11.0  --set installCRDs=true
-``` -->
-
-### Install Longhorn
+Source: [K3s Docs](https://docs.k3s.io/storage#setting-up-longhorn)
 
 ```bash
 # on node
 sudo apt-get install open-iscsi
-sudo nano /etc/sysctl.d/k3s.conf
-# net.bridge.bridge-nf-call-ip6tables = 1
-# net.bridge.bridge-nf-call-iptables = 1
-helm repo add longhorn https://charts.longhorn.io
-helm repo update
-helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace
-kubectl apply -f longhorn/route.yml
+sudo echo 'net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+'> /etc/sysctl.d/k3s.conf
 ```
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.6.2/deploy/longhorn.yaml
+kubectl -n longhorn-system edit cm longhorn-storageclass # change numberOfReplicas: to "1" for single-node cluster
+```
+
+## Install MetalLB
+
+Choose an IP range which is not in use in your network, and configure it in `metallb/address-pool.yml`. Install MetalLB and apply the address pool.
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml
+kubectl apply -f metallb/address-pool.yml
+```
+
+## Install Istio
+
+```bash
+helm repo add istio https://istio-release.storage.googleapis.com/charts
+helm repo update
+kubectl create namespace istio-system
+helm install istio-base istio/base -n istio-system --set defaultRevision=default --set cni.enabled=true
+helm repo add istio https://istio-release.storage.googleapis.com/charts
+helm repo update
+helm install istio-cni istio/cni -n kube-system
+helm install istiod istio/istiod -n istio-system --set pilot.cni.enabled=true --wait
+```
+
+## Install Dashboard
+
+Source: [K3s Docs](https://docs.k3s.io/installation/kube-dashboard)
+Find the newest version [here](https://github.com/kubernetes/dashboard/releases).
+
+```bash
+# Add kubernetes-dashboard repository
+helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
+# Deploy a Helm Release named "kubernetes-dashboard" using the kubernetes-dashboard chart
+helm upgrade --install kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard --create-namespace --namespace kubernetes-dashboard
+kubectl apply -f kubernetes-dashboard/dashboard.admin-user.yml
+# kubectl -n kubernetes-dashboard create sa admin-user
+kubectl -n kubernetes-dashboard create token admin-user > ~/.kube/admin-user.token
+cat ~/.kube/admin-user.token
+kubectl -n kubernetes-dashboard port-forward svc/kubernetes-dashboard-kong-proxy 8443:443
+```
+
+The Dashboard is now accessible at [https://localhost:8443](https://localhost:8443). Sign In with the admin-user Bearer Token (in `~/.kube/admin-user.token`).
+
+## Add another node to the cluster
+
+<!-- On control machine, get the node token:
+
+```bash
+cat /var/lib/rancher/k3s/server/node-token
+``` -->
+
+To add a node, run command on that node:
+
+```bash
+curl -sfL https://get.k3s.io | K3S_TOKEN=SECRET K3S_URL=https://<existing-master-ip>:6443 sh -s - server --cluster-init
+```
+
