@@ -1,0 +1,22 @@
+#!/bin/sh
+# /etc/kernel/postinst.d/z50-update-raspi-firmware
+
+# Exit if we are not receiving the version argument
+if [ -z "$1" ]; then
+    exit 0
+fi
+
+VERSION="$1"
+BOOT_DIR="/boot/firmware"
+INITRD_SRC="${BOOT_DIR}/initrd.img-${VERSION}"
+INITRD_DEST="${BOOT_DIR}/initramfs.gz"
+
+# Check if the newly generated initrd exists
+if [ -f "$INITRD_SRC" ]; then
+    echo "Copying ${INITRD_SRC} to ${INITRD_DEST}..."
+    cp -f "$INITRD_SRC" "$INITRD_DEST"
+    # Ensure it's flushed to disk
+    sync
+else
+    echo "Warning: Expected initrd ${INITRD_SRC} not found."
+fi

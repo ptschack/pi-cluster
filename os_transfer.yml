@@ -1,7 +1,5 @@
 - name: provision k3snodes
   hosts: k3snodes
   roles:
-    - basic
-    - disable_swap
-    - zsh
-    - x735
+    - os_transfer
+

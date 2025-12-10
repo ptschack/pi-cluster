@@ -1,1 +1,2 @@
-ansible
+ansible>=6.0.0
+cryptography    # Required by community.crypto for LUKS operations

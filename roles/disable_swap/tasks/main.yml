@@ -1,0 +1,87 @@
+- name: Gather facts about active swap files
+  become: yes
+  # We parse /proc/swaps to identify swap entries.
+  # $2 == "file" ensures we only identify actual files for later deletion.
+  # Partitions (Type "partition") are excluded here to ensure we don't try to delete device nodes.
+  shell: |
+    cat /proc/swaps | awk '$2 == "file" {print $1}'
+  register: active_swap_files
+  changed_when: false
+
+- name: Disable all active swap (Files, Partitions, and ZRAM)
+  become: yes
+  command: swapoff -a
+  # This command universally disables all swap forms immediately.
+  when: ansible_swaptotal_mb > 0
+
+# --- ZRAM SPECIFIC FIXES ---
+- name: Remove ZRAM persistent configuration files
+  become: yes
+  # Many distros use zram-generator.conf or /etc/default/zramswap.
+  # If these exist, systemd will recreate zram0 on boot even if fstab is clean.
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/zram-generator.conf
+    - /usr/lib/systemd/zram-generator.conf
+    - /etc/default/zramswap
+
+- name: Blacklist ZRAM kernel module
+  become: yes
+  # This is the strongest way to prevent ZRAM. It tells the kernel
+  # "if anything asks for zram, do nothing (/bin/true)".
+  copy:
+    dest: /etc/modprobe.d/blacklist-zram.conf
+    content: |
+      blacklist zram
+      install zram /bin/true
+    mode: '0644'
+
+- name: Unload ZRAM kernel module
+  become: yes
+  # Try to remove the module immediately from the running kernel.
+  # This might fail if the module is built-in or busy, hence ignore_errors.
+  command: modprobe -r zram
+  ignore_errors: true
+# ---------------------------
+
+- name: Remove zram-related packages
+  become: yes
+  # Removing these prevents the service files from being present.
+  package:
+    name:
+      - zram-config
+      - zram-tools
+      - zram-generator
+      - zram-generator-defaults
+    state: absent
+  ignore_errors: true
+
+- name: Comment out swap entries in /etc/fstab
+  become: yes
+  replace:
+    path: /etc/fstab
+    # Regex explanation:
+    # ^\s* = Start of line (allow leading whitespace)
+    # ([^#].*?)   = Capture line content if it doesn't start with #
+    # \s+swap\s+  = Look for "swap" in the type column.
+    # .*$         = Match rest of line
+    regexp: '^\s*([^#].*?\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Delete the actual swap files from filesystem
+  become: yes
+  file:
+    path: "{{ item }}"
+    state: absent
+  # We strictly loop over items identified as "file" type in step 1.
+  loop: "{{ active_swap_files.stdout_lines }}"
+
+- name: Mask systemd swap target
+  become: yes
+  systemd:
+    name: swap.target
+    masked: true
+    enabled: false
+  ignore_errors: true

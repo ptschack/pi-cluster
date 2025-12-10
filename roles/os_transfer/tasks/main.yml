@@ -1,0 +1,402 @@
+# -------------------------------------------------------
+# 0. Safety Checks
+# -------------------------------------------------------
+- name: Check if target_drive is defined
+  assert:
+    that:
+      - target_drive is defined
+      - target_drive | length > 0
+    fail_msg: "target_drive variable is not defined or empty."
+
+- name: Get mounted devices
+  set_fact:
+    mounted_devices: "{{ ansible_mounts | map(attribute='device') | list }}"
+    mounted_mountpoints: "{{ ansible_mounts | map(attribute='mount') | list }}"
+
+- name: Safety Check - Target drive is not Root
+  assert:
+    that:
+      - "target_drive not in mounted_devices"
+      - "target_drive ~ '1' not in mounted_devices"
+      - "target_drive ~ '2' not in mounted_devices"
+    fail_msg: "SAFETY FAIL: Target drive {{ target_drive }} seems to be mounted (possibly as Root). Check your target_drive settings!"
+
+- name: Safety Check - Mount point is NOT system root
+  assert:
+    that:
+      - mount_point != '/'
+      - mount_point != '/boot'
+      - mount_point != '/boot/firmware'
+    fail_msg: "SAFETY FAIL: mount_point is set to {{ mount_point }}, which looks like a system path!"
+
+# -------------------------------------------------------
+# 1. Host Preparation & Partitioning
+# -------------------------------------------------------
+- name: Install host dependencies
+  become: yes
+  apt:
+    name:
+      - cryptsetup-bin
+      - cryptsetup
+      - cryptsetup-initramfs
+      - lshw
+      - parted
+      - rsync
+    state: present
+    update_cache: yes
+
+- name: Unmount target drive partitions if mounted
+  become: yes
+  mount:
+    path: "{{ item }}"
+    state: unmounted
+  with_items:
+    - "{{ mount_point }}/boot/firmware"
+    - "{{ mount_point }}"
+  ignore_errors: yes
+
+- name: Partition target disk using single explicit command
+  become: yes
+  ansible.builtin.shell: |
+    /usr/sbin/parted -s -a optimal -- {{ target_drive }} \
+      mklabel gpt \
+      mkpart primary fat32 0% 1GiB \
+      set 1 boot on \
+      mkpart primary ext4 1GiB 100%
+  register: parted_result
+  # Use an explicit check for change based on the command succeeding
+  changed_when: parted_result.rc == 0 and 'Error:' not in parted_result.stderr
+  tags: [partioning] # Add a tag for easy re-running
+
+# -------------------------------------------------------
+# 2. Encryption & Filesystems
+# -------------------------------------------------------
+
+- name: Format LUKS container (Fallback with command module)
+  become: yes
+  ansible.builtin.command: |
+    cryptsetup luksFormat \
+      -c xchacha20,aes-adiantum-plain64 \
+      --pbkdf-memory 512000 \
+      --pbkdf-parallel=1 \
+      --type luks2 \
+      {{ target_drive }}2
+  args:
+    stdin: "{{ luks_passphrase }}" # Pass the passphrase securely via stdin
+  # Only format if it's not already a LUKS device
+  # when: not target_drive + '2' is luks_device
+  # Registering the command result can check for success/failure
+  register: luks_format_result
+  changed_when: luks_format_result.rc == 0
+
+# Ansible default, usually safer than manual pbkdf settings
+# Note: The manual command uses --pbkdf-memory 512000.
+# If specific pbkdf options are strictly required, use 'command' module instead.
+
+- name: Open LUKS container
+  become: yes
+  community.crypto.luks_device:
+    device: "{{ target_drive }}2"
+    state: opened
+    name: crypted
+    passphrase: "{{ luks_passphrase }}"
+
+- name: Format Root Filesystem (ext4)
+  become: yes
+  filesystem:
+    fstype: ext4
+    dev: /dev/mapper/crypted
+
+- name: Format Boot Filesystem (vfat)
+  become: yes
+  filesystem:
+    fstype: vfat
+    dev: "{{ target_drive }}1"
+
+# -------------------------------------------------------
+# 3. Mounting & Data Transfer
+# -------------------------------------------------------
+- name: Create mount points
+  become: yes
+  file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ mount_point }}"
+    - "{{ mount_point }}/boot/firmware"
+
+- name: Mount Root (Shell to avoid fstab)
+  become: yes
+  shell: mount /dev/mapper/crypted {{ mount_point }}
+
+- name: Create boot mount point
+  become: yes
+  file:
+    path: "{{ mount_point }}/boot/firmware"
+    state: directory
+
+- name: Mount Boot (Shell to avoid fstab)
+  become: yes
+  shell: mount {{ target_drive }}1 {{ mount_point }}/boot/firmware
+
+- name: Sync Filesystem (Rsync)
+  # Using shell because Ansible synchronize is for remote-to-local.
+  # We are doing local-to-local (SD to HDD) on the Pi.
+  become: yes
+  shell: |
+    rsync -avHAX / "{{ mount_point }}/" \
+    --exclude='/boot/firmware' \
+    --exclude='/mnt' \
+    --exclude='/dev' \
+    --exclude='/proc' \
+    --exclude='/sys'
+  # warn: false
+
+- name: Ensure critical directories exist
+  become: yes
+  file:
+    path: "{{ mount_point }}/{{ item }}"
+    state: directory
+  loop: [mnt, dev, proc, sys]
+
+- name: Sync Boot Partition
+  become: yes
+  shell: rsync -avHAX /boot/firmware/ "{{ mount_point }}/boot/firmware/"
+  # warn: false
+
+# -------------------------------------------------------
+# 4. Prepare Chroot Environment
+# -------------------------------------------------------
+- name: Bind Mount virtual filesystems
+  become: yes
+  shell: mount --bind /{{ item }} {{ mount_point }}/{{ item }}
+  loop:
+    - dev
+    - dev/pts
+    - proc
+    - sys
+
+- name: Backup existing resolv.conf in chroot
+  become: yes
+  ansible.builtin.command:
+    cmd: mv {{ mount_point }}/etc/resolv.conf {{ mount_point }}/etc/resolv.conf.bak
+  # Only run if the backup doesn't exist yet to prevent overwriting backup with bad data
+  args:
+    creates: "{{ mount_point }}/etc/resolv.conf.bak"
+
+- name: Set static DNS for chroot (1.1.1.1)
+  become: yes
+  ansible.builtin.copy:
+    content: "nameserver 1.1.1.1"
+    dest: "{{ mount_point }}/etc/resolv.conf"
+
+# -------------------------------------------------------
+# 5. Chroot Configuration
+# -------------------------------------------------------
+- name: Install packages inside chroot
+  become: yes
+  ansible.builtin.command: |
+    chroot {{ mount_point }} /bin/bash -c "
+      apt-get update && \
+      apt-get install -y busybox cryptsetup dropbear-initramfs open-iscsi
+    "
+
+- name: Get UUIDs
+  become: yes
+  shell: |
+    blkid -s UUID -o value {{ target_drive }}2
+  register: crypto_uuid
+
+- name: Get PARTUUID
+  become: yes
+  shell: |
+    blkid -s PARTUUID -o value {{ target_drive }}1
+  register: boot_partuuid
+
+- name: Update fstab (Root)
+  become: yes
+  replace:
+    path: "{{ mount_point }}/etc/fstab"
+    regexp: '^[^\s]+\s+/\s+'
+    replace: "/dev/mapper/crypted / "
+
+- name: Update fstab (Boot)
+  become: yes
+  replace:
+    path: "{{ mount_point }}/etc/fstab"
+    regexp: '^[^\s]+\s+/boot/firmware\s+'
+    replace: "PARTUUID={{ boot_partuuid.stdout | trim }} /boot/firmware "
+
+- name: Create crypttab
+  become: yes
+  copy:
+    dest: "{{ mount_point }}/etc/crypttab"
+    content: "crypted UUID={{ crypto_uuid.stdout | trim }} none luks,initramfs\n"
+
+- name: Update cmdline.txt
+  become: yes
+  replace:
+    path: "{{ mount_point }}/boot/firmware/cmdline.txt"
+    regexp: 'root=.[^\s]* '
+    replace: "root=/dev/mapper/crypted cryptdevice=UUID={{ crypto_uuid.stdout | trim }}:crypted "
+
+- name: Enable CRYPTSETUP in initramfs hook
+  become: yes
+  lineinfile:
+    path: "{{ mount_point }}/etc/cryptsetup-initramfs/conf-hook"
+    line: "CRYPTSETUP=y"
+    create: yes
+
+- name: Ensure target SSH directories exist and are secure
+  become: yes
+  ansible.builtin.file:
+    path: "{{ mount_point }}/{{ item.path }}"
+    state: directory
+    mode: "0700"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+  loop:
+    - { path: "root/.ssh", owner: "root", group: "root" }
+    - {
+        path: "home/{{ (ansible_user | default(ansible_user_id)) }}/.ssh",
+        owner: "{{ (ansible_user | default(ansible_user_id)) }}",
+        group: "{{ (ansible_user | default(ansible_user_id)) }}",
+      }
+
+- name: Copy authorized_keys to Dropbear (Initramfs)
+  become: yes
+  ansible.builtin.copy:
+    src: files/authorized_keys
+    dest: "{{ mount_point }}/etc/dropbear/initramfs/authorized_keys"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Copy authorized_keys to new Root user
+  become: yes
+  ansible.builtin.copy:
+    src: files/authorized_keys
+    dest: "{{ mount_point }}/root/.ssh/authorized_keys"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Copy authorized_keys to new standard user
+  become: yes
+  ansible.builtin.copy:
+    src: files/authorized_keys
+    dest: "{{ mount_point }}/home/{{ (ansible_user | default(ansible_user_id)) }}/.ssh/authorized_keys"
+    owner: "{{ (ansible_user | default(ansible_user_id)) }}"
+    group: "{{ (ansible_user | default(ansible_user_id)) }}"
+    mode: "0600"
+
+- name: Create kernel update script
+  become: yes
+  ansible.builtin.copy:
+    src: files/z50-update-raspi-firmware
+    dest: "{{ mount_point }}/etc/kernel/postinst.d/z50-update-raspi-firmware"
+    mode: "0755"
+
+- name: Add required kernel modules to initramfs configuration if not present
+  become: yes
+  ansible.builtin.lineinfile:
+    path: "{{ mount_point }}/etc/initramfs-tools/modules"
+    line: "{{ item }}"
+    state: present
+    create: yes
+    owner: root
+    group: root
+  loop:
+    - chacha20
+    - xchacha20
+    - adiantum
+    - nhpoly1305
+    - poly1305
+    - aes_arm64
+    - sha256
+    - libchacha
+
+- name: Configure Dropbear options
+  become: yes
+  lineinfile:
+    path: "{{ mount_point }}/etc/dropbear/initramfs/dropbear.conf"
+    line: 'DROPBEAR_OPTIONS="-j -k -p 2222 -s"'
+
+- name: Increase Cryptroot unlock timeout
+  become: yes
+  replace:
+    path: "{{ mount_point }}/usr/share/cryptsetup/initramfs/bin/cryptroot-unlock"
+    regexp: "^TIMEOUT=.*"
+    replace: "TIMEOUT=100"
+
+- name: Update initramfs conf to use /boot/firmware
+  become: yes
+  lineinfile:
+    path: "{{ mount_point }}/etc/initramfs-tools/update-initramfs.conf"
+    line: "BOOTDIR=/boot/firmware"
+    regexp: "^BOOTDIR=.*"
+
+- name: Generate Initramfs (Inside Chroot)
+  become: yes
+  shell: |
+    chroot {{ mount_point }} /bin/bash -c "
+      KERNELFLAVOR=\$(if [ \$(lshw | grep -Po '(?<=product: Raspberry Pi )[^\s]*') -eq 4 ]; then echo v8; else echo 2712; fi)
+      KERNEL_VERSION=\$(ls /lib/modules/ | grep \$KERNELFLAVOR | awk '{print \$1}')
+      mkinitramfs -o /boot/firmware/initrd.img-\${KERNEL_VERSION} \${KERNEL_VERSION}
+      cp /boot/firmware/initrd.img-\${KERNEL_VERSION} /boot/firmware/initramfs.gz
+    "
+
+- name: Update config.txt for initramfs
+  become: yes
+  block:
+    - name: Disable auto_initramfs
+      replace:
+        path: "{{ mount_point }}/boot/firmware/config.txt"
+        regexp: "^#?auto_initramfs=.*"
+        replace: "auto_initramfs=0"
+
+    - name: Remove old initramfs lines
+      lineinfile:
+        path: "{{ mount_point }}/boot/firmware/config.txt"
+        regexp: "^initramfs "
+        state: absent
+
+    - name: Add new initramfs line
+      lineinfile:
+        path: "{{ mount_point }}/boot/firmware/config.txt"
+        insertafter: '^\[all\]'
+        line: "initramfs initramfs.gz followkernel"
+
+    - name: Add cgroup settings to cmdline
+      lineinfile:
+        path: "{{ mount_point }}/boot/firmware/cmdline.txt"
+        backrefs: yes
+        regexp: "(.*)$"
+        line: '\1 cgroup_memory=1 cgroup_enable=memory'
+
+# -------------------------------------------------------
+# 6. Cleanup
+# -------------------------------------------------------
+
+- name: Restore original resolv.conf
+  become: yes
+  ansible.builtin.command:
+    cmd: mv {{ mount_point }}/etc/resolv.conf.bak {{ mount_point }}/etc/resolv.conf
+  # Only run if the backup actually exists
+  args:
+    removes: "{{ mount_point }}/etc/resolv.conf.bak"
+
+- name: Unmount all
+  become: yes
+  shell: umount -R {{ mount_point }}
+  ignore_errors: yes
+
+- name: Close LUKS container
+  become: yes
+  community.crypto.luks_device:
+    name: crypted
+    state: closed
+
+- name: Execute the shutdown command
+  become: yes
+  community.general.shutdown:

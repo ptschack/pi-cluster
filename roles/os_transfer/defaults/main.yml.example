@@ -1,0 +1,4 @@
+---
+target_drive: "/dev/sdb"    # the device you want to install the OS to. THIS DRIVE WILL BE COMPLETELY OVERWRITTEN, DOUBLE CHECK THIS!
+luks_passphrase: "changeme" # the passphrase with which the HDD will be encrypted
+mount_point: "/mnt/chroot"  # no need to change this
