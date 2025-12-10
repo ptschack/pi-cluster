@@ -30,6 +30,7 @@
       - ncdu
       - smartmontools
       - libxml2-utils
+      - nfs-common
 
 - name: upgrade all packages
   become: yes
@@ -38,52 +39,17 @@
     upgrade: full
     force_apt_get: yes
 
-# - name: Gather facts about active swap files
-#   # We parse /proc/swaps to identify swap entries.
-#   # $2 == "file" ensures we only identify actual files for later deletion.
-#   # Partitions (Type "partition") are excluded here to ensure we don't try to delete device nodes.
-#   become: yes
-#   shell: |
-#     cat /proc/swaps | awk '$2 == "file" {print $1}'
-#   register: active_swap_files
-#   changed_when: false
+- name: Ensure user is in sudo group
+  become: yes
+  user:
+    name: "{{ ansible_user }}"
+    groups: sudo
+    append: yes
 
-# - name: Disable all active swap (Files and Partitions)
-#   command: swapoff -a
-#   become: yes
-#   # This command universally disables all swap forms immediately, including partitions.
-#   when: ansible_swaptotal_mb > 0
-
-# - name: Comment out swap entries in /etc/fstab
-#   become: yes
-#   replace:
-#     path: /etc/fstab
-#     # Regex explanation:
-#     # ^\s* = Start of line (allow leading whitespace)
-#     # ([^#].*?)   = Capture line content if it doesn't start with #
-#     # \s+swap\s+  = Look for "swap" in the type column. This matches:
-#     #               - /swapfile ... swap ...
-#     #               - UUID=... ... swap ... (Partitions)
-#     #               - /dev/sda2 ... swap ... (Partitions)
-#     # .*$         = Match rest of line
-#     regexp: '^\s*([^#].*?\s+swap\s+.*)$'
-#     replace: '# \1'
-
-# - name: Delete the actual swap files from filesystem
-#   become: yes
-#   file:
-#     path: "{{ item }}"
-#     state: absent
-#   # We strictly loop over items identified as "file" type in step 1.
-#   # Swap partitions are NOT in this list, so they are preserved on disk (just disabled).
-#   loop: "{{ active_swap_files.stdout_lines }}"
-
-# - name: Mask systemd swap target
-#   become: yes
-#   systemd:
-#     name: swap.target
-#     masked: true
-#     enabled: false
-#   ignore_errors: true
-#   # Masking swap.target prevents systemd from automatically triggering swap units,
-#   # which helps prevent auto-mounting of swap partitions on GPT disks.
+- name: specific sudoers configuration for {{ ansible_user }} (password required)
+  become: yes
+  copy:
+    content: "{{ ansible_user }} ALL=(ALL) ALL"
+    dest: /etc/sudoers.d/020_{{ ansible_user }}
+    mode: "0440"
+    validate: "visudo -cf %s"

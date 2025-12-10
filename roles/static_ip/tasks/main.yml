@@ -1,0 +1,88 @@
+---
+- name: Validate required variables
+  fail:
+    msg: "Variables 'static_ip_address' (CIDR) and 'static_ip_gateway' are required."
+  when:
+    - static_ip_address is not defined
+    - static_ip_gateway is not defined
+
+# ----------------------------------------------------
+# 1. Boot Configuration (Dropbear / cmdline.txt)
+# ----------------------------------------------------
+# Done first to ensure it's applied even if network cuts out later.
+
+- name: Configure Dropbear IP in cmdline.txt
+  when: configure_dropbear_ip | bool
+  become: yes
+  block:
+    - name: Calculate Netmask from CIDR (Python on target)
+      command: python3 -c "import ipaddress; print(str(ipaddress.IPv4Interface('{{ static_ip_address }}').netmask))"
+      register: calculated_netmask
+      changed_when: false
+
+    - name: Clean up existing ip parameters in cmdline.txt
+      replace:
+        path: "{{ static_ip_cmdline_path }}"
+        regexp: " ip=[^ ]+"
+        replace: ""
+
+    # Format: ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>
+    # <server-ip> is empty. <autoconf> is off.
+
+    - name: Ensure ip= is present
+      lineinfile:
+        path: "{{ static_ip_cmdline_path }}"
+        backrefs: yes
+        regexp: "^(.*)$"
+        line: '\1 ip={{ static_ip_address | split("/") | first }}::{{ static_ip_gateway }}:{{ calculated_netmask.stdout }}:{{ inventory_hostname }}:{{ static_ip_interface }}:off'
+      when: static_ip_state == 'present'
+
+# ----------------------------------------------------
+# 2. Runtime Configuration (NetworkManager)
+# ----------------------------------------------------
+
+- name: Configure Static IP (nmcli)
+  become: yes
+  block:
+    - name: Check which connection is active on the interface
+      command: nmcli -t -f UUID,DEVICE connection show --active
+      register: nmcli_active
+      changed_when: false
+
+    - name: Get Connection Name for Interface
+      set_fact:
+        nm_con_name: "static-{{ static_ip_interface }}"
+
+    - name: Create connection if it doesn't exist
+      command: >
+        nmcli con add type ethernet ifname {{ static_ip_interface }}
+        con-name {{ nm_con_name }}
+        ipv4.method manual
+        ipv4.addresses {{ static_ip_address }}
+        ipv4.gateway {{ static_ip_gateway }}
+        ipv4.dns {{ static_ip_dns }}
+      register: nmcli_add
+      failed_when:
+        - nmcli_add.rc != 0
+        - "'already exists' not in nmcli_add.stderr"
+      changed_when: nmcli_add.rc == 0
+
+    - name: Modify existing connection (if created or exists)
+      command: >
+        nmcli con mod {{ nm_con_name }}
+        ipv4.method manual
+        ipv4.addresses {{ static_ip_address }}
+        ipv4.gateway {{ static_ip_gateway }}
+        ipv4.dns {{ static_ip_dns }}
+      when: nmcli_add.rc != 0
+      changed_when: true
+
+    - name: Bring up connection (Async)
+      command: nmcli con up {{ nm_con_name }}
+      async: 10
+      poll: 0
+      register: nmcli_up
+      changed_when: true # Always mark changed as we fired it off
+  when:
+    - static_ip_state == 'present'
+    - static_ip_configure_nm | default(true) | bool

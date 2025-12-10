@@ -1,7 +1,16 @@
 - name: provision k3snodes
   hosts: k3snodes
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for target connection
+      wait_for_connection:
+        timeout: 10
+
+    - name: Gather Facts
+      setup:
   roles:
     - basic
     - disable_swap
     - zsh
     - x735
+    - static_ip

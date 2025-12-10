@@ -1,4 +1,4 @@
 [k3snodes]
-mynode01
-mynode02
-mynode03
+mynode01 static_ip_address=192.168.1.11/24 static_ip_gateway=192.168.1.1
+mynode02 static_ip_address=192.168.1.12/24 static_ip_gateway=192.168.1.1
+mynode03 static_ip_address=192.168.1.13/24 static_ip_gateway=192.168.1.1

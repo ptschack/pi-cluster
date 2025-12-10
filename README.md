@@ -118,6 +118,8 @@ When connected, run `cryptroot-unlock` and enter the decryption password when pr
 
 ### Apply Playbooks
 
+With the target disk connected to the Pi, run the `site.yml` playbook **on your control machine, not on the Pi**:
+
 ```bash
 ansible-playbook -u 'username_on_pi' -i hosts site.yml --ask-become-pass
 ```

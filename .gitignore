@@ -2,4 +2,3 @@ venv/**
 hosts
 roles/os_transfer/files/authorized_keys
 roles/os_transfer/defaults/main.yml
-output*.txt
