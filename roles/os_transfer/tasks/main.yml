@@ -320,7 +320,7 @@
   become: yes
   lineinfile:
     path: "{{ mount_point }}/etc/dropbear/initramfs/dropbear.conf"
-    line: 'DROPBEAR_OPTIONS="-j -k -p 2222 -s"'
+    line: 'DROPBEAR_OPTIONS="-j -k -p 2222 -s -c cryptroot-unlock"'
 
 - name: Increase Cryptroot unlock timeout
   become: yes
