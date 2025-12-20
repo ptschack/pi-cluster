@@ -1,0 +1,63 @@
+---
+# 1. Create the Namespace explicitly
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: syncthing
+---
+# 2. Define the DaemonSet inside that Namespace
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: syncthing
+  namespace: syncthing
+  labels:
+    app: syncthing
+spec:
+  selector:
+    matchLabels:
+      app: syncthing
+  template:
+    metadata:
+      labels:
+        app: syncthing
+    spec:
+      initContainers:
+        - name: fix-permissions
+          image: busybox:latest
+          command: ["sh", "-c", "chown -R 1000:1000 /var/syncthing"]
+          volumeMounts:
+            - name: node-storage
+              mountPath: /var/syncthing
+
+      containers:
+        - name: syncthing
+          image: syncthing/syncthing:latest
+          ports:
+            - containerPort: 8384
+              hostPort: 8384
+              name: gui
+            - containerPort: 22000
+              hostPort: 22000
+              name: protocol
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          volumeMounts:
+            - name: node-storage
+              mountPath: /var/syncthing
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "50m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+      volumes:
+        - name: node-storage
+          hostPath:
+            path: /var/syncthing-data
+            type: DirectoryOrCreate

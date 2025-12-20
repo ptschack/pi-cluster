@@ -8,6 +8,13 @@
       - target_drive | length > 0
     fail_msg: "target_drive variable is not defined or empty."
 
+- name: Check if static_ip variables are defined
+  assert:
+    that:
+      - static_ip_address is defined
+      - static_ip_gateway is defined
+    fail_msg: "Variables 'static_ip_address' (CIDR) and 'static_ip_gateway' are required for static IP configuration."
+
 - name: Get mounted devices
   set_fact:
     mounted_devices: "{{ ansible_mounts | map(attribute='device') | list }}"
@@ -239,6 +246,49 @@
     path: "{{ mount_point }}/boot/firmware/cmdline.txt"
     regexp: 'root=.[^\s]* '
     replace: "root=/dev/mapper/crypted cryptdevice=UUID={{ crypto_uuid.stdout | trim }}:crypted "
+
+- name: Calculate Netmask from CIDR (Python on target)
+  command: python3 -c "import ipaddress; print(str(ipaddress.IPv4Interface('{{ static_ip_address }}').netmask))"
+  register: calculated_netmask
+  changed_when: false
+
+- name: Configure Dropbear IP in cmdline.txt
+  become: yes
+  lineinfile:
+    path: "{{ mount_point }}/boot/firmware/cmdline.txt"
+    backrefs: yes
+    regexp: "^(.*)$"
+    line: '\1 ip={{ static_ip_address | split("/") | first }}::{{ static_ip_gateway }}:{{ calculated_netmask.stdout }}:{{ inventory_hostname }}:{{ static_ip_interface | default("eth0") }}:off'
+
+- name: Configure Static IP in NetworkManager (Chroot)
+  when: static_ip_configure_nm | default(true) | bool
+  become: yes
+  block:
+    - name: Create NetworkManager connection file
+      copy:
+        dest: "{{ mount_point }}/etc/NetworkManager/system-connections/static-{{ static_ip_interface | default('eth0') }}.nmconnection"
+        mode: "0600"
+        content: |
+          [connection]
+          id=static-{{ static_ip_interface | default('eth0') }}
+          uuid={{ 99999999 | random | to_uuid }}
+          type=ethernet
+          interface-name={{ static_ip_interface | default('eth0') }}
+          permissions=
+
+          [ethernet]
+          mac-address-blacklist=
+
+          [ipv4]
+          address1={{ static_ip_address }},{{ static_ip_gateway }}
+          dns={{ static_ip_dns | default('8.8.8.8') }};
+          method=manual
+
+          [ipv6]
+          addr-gen-mode=stable-privacy
+          method=auto
+
+          [proxy]
 
 - name: Enable CRYPTSETUP in initramfs hook
   become: yes
